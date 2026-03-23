@@ -1,0 +1,641 @@
+---
+title: "Uncovered Interest Rate Parity (UIRP) Analysis"
+editor: source
+format:
+  html: 
+    page-layout: article
+    # html-table-processing: none
+    code-fold: true
+    code-summary: "Show code"
+    df-print: kable
+    code-block-border-left: "royalblue"
+    code-block-bg: true
+    toc: true
+    self-contained: true
+    embed-resources: true
+
+  # typst:
+  #   latex-engine: xelatex
+  #   embed-resources: true
+  #   code-block: false
+  #   citation-package: natbib
+  #   includes:
+  #     in-header: header.tex
+  #   code-tools: true
+  #   code-fold: true
+  #   df-print: kable
+  #   number-sections: true
+toc-depth: 2
+fig-align: center
+number-sections: true
+lang: en
+# author:
+#   - name: Pietro Rota
+#     affiliation:
+#       - name: Bayes Business School – City, St George’s University of London
+#         city: London
+#         state: UK
+#         url: https://www.bayes.citystgeorges.ac.uk/
+---
+
+| Name              | Student Id | E-Mail Address                         |
+| ----------------- | ---------- | -------------------------------------- |
+| Delalande, Paul   | 220008469  | <Paul.Delalande@citystgeorges.ac.uk>   |
+| Martinsson, Alvin | 250023511  | <Alvin.Martinsson@citystgeorges.ac.uk> |
+| Porter, James     | 250057482  | <James.Porter@citystgeorges.ac.uk>     |
+| Rota, Pietro      | 250052269  | <Pietro.Rota@citystgeorges.ac.uk>      |
+
+
+
+# Introduction
+Currency Pair: JPY/USD | Frequency: Daily | Rates: 12-Month Money Market
+
+```{python}
+#| label: import
+from great_tables import GT
+import selenium
+import playwright
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+from matplotlib.ticker import AutoMinorLocator
+import warnings
+warnings.filterwarnings("ignore")
+import statsmodels.api as sm
+from scipy import stats
+
+plt.rcParams["figure.constrained_layout.use"] = True
+# violin plot 
+import ptitprince as pt
+import seaborn as sns
+```
+
+## Load Data and Variable Creation
+
+```{python}
+#| label: data
+#| include: false
+FILE_PATH = "C:\\Users\\pietr\\OneDrive - City St George's, University of London\\Documents\\a2025-2026 BAYES\\IF - International Finance\\IF - Course Work\\DATA UIP OFFLINE.xlsx"
+
+SJU = pd.read_excel(FILE_PATH, sheet_name = "USDJPY",  skiprows=5)
+IU  = pd.read_excel(FILE_PATH, sheet_name = "USD 12M", skiprows=5)
+IJ  = pd.read_excel(FILE_PATH, sheet_name = "JPY 12M", skiprows=5)
+
+sju_clean = SJU[['Date', 'PX_LAST']].rename(columns={'PX_LAST': 'Spot_Rate'})
+iu_clean  = IU[['Date', 'PX_LAST']].rename(columns={'PX_LAST': 'USD_12M'})
+ij_clean  = IJ[['Date', 'PX_LAST']].rename(columns={'PX_LAST': 'JPY_12M'})
+
+# 3. Merge them step-by-step
+df = pd.merge(sju_clean, iu_clean, on='Date', how='left')
+df = pd.merge(df, ij_clean, on='Date', how='left')
+
+df.columns = ["Date", "Spot", "IR_US", "IR_JP"]
+df = df.dropna().sort_values("Date").reset_index(drop=True)
+```
+
+```{python}
+divider = 1 / 12 / 100
+df["IR_JP"] = df["IR_JP"] * divider
+df["IR_US"] = df["IR_US"] * divider
+
+main_y = "dS"
+
+if main_y == "dS" : 
+    print(f"This regression is using {main_y} which means Log change") 
+elif main_y == "dSp":
+    print(f"This regression is using {main_y} which means Percentage change") 
+else : 
+    print("The file will yield an error")
+```
+
+Note on the interest rate differential we are using  Japan minus US not because we are representing japan but because thats how our exchange rate is structured in how many yen does it take to get a dollar
+
+```{python}
+#| label: var_creation
+# Log change in exchange rate (JPY/USD): positive = JPY depreciation
+df["dS"] = np.log(df["Spot"]).diff()              # in log
+df["dSp"] = df["Spot"]/df["Spot"].shift(1)-1      # in %  
+
+# Interest rate differential: Japan minus US (domestic - foreign)
+df["Diff"] = (df["IR_JP"] - df["IR_US"])
+df["Diff_lag"] = df["Diff"].shift(1)
+
+
+df_plot = df.dropna().copy()
+
+T = len(df)
+print(f"Sample: {df.iloc[0]["Date"].strftime("%Y-%m-%d")} -> {df.iloc[len(df)-1]["Date"].strftime("%Y-%m-%d")}  |  T = {T}\n")
+df_plot
+```
+
+# DESCRIPTIVE STATISTICS
+
+```{python}
+#| html-table-processing: none
+# 1. Update labels to be explicit about units and frequency
+desc_vars = {
+    "Spot Rate (JPY/USD)"         : df_plot["Spot"],
+    "Log ΔSpot (Daily)"           : df_plot["dS"],
+    "Japan IR (Monthly equiv.)"   : df_plot["IR_JP"],
+    "US IR (Monthly equiv.)"      : df_plot["IR_US"],
+    "Interest Rate Diff (JP-US)"  : df_plot["Diff"],
+}
+
+stats_rows = []
+for label, series in desc_vars.items():
+    stats_rows.append({
+        "Series"    : label,
+        "Obs"       : int(series.count()),
+        "Mean"      : series.mean(),
+        "Std Dev"   : series.std(),
+        "Min"       : series.min(),
+        "25%"       : series.quantile(0.25),
+        "Median"    : series.median(),
+        "75%"       : series.quantile(0.75),
+        "Max"       : series.max(),
+        "Skewness"  : series.skew(),
+        "Kurtosis"  : series.kurt(),
+        
+    })
+
+stats_df = pd.DataFrame(stats_rows).set_index("Series")
+
+
+stats_df.columns = ['Count', 'Mean', 'Std', 'Min', '25%', '50%', '75%', 'Max', 'Skew', 'Kurt']
+stats_df["Name"] = stats_df.index
+
+# 2. Refined GT Formatting
+GTTTdes2 = (
+    GT(stats_df)
+    .cols_move_to_start(columns="Name")
+    .tab_header(
+        title="Descriptive Statistics",
+        subtitle="Sample Period: March 2010 – March 2026"
+    )
+    .opt_stylize(5, color = "gray")
+    .fmt_integer(columns = "Count")
+    # Format Rates and Changes as Percentages
+    .fmt(lambda x: f"{x:.3%}", 
+         rows=[1,2,3,4], 
+         columns=['Mean', 'Std', 'Min', '25%', '50%', '75%', 'Max'])
+    # Format Spot Rate, Skew, and Kurtosis as standard floats (NOT percentages)
+    .fmt(lambda x: f"{x:.2f}", 
+         rows=[0], 
+         columns=['Mean', 'Std', 'Min', '25%', '50%', '75%', 'Max'])
+    .fmt(lambda x: f"{x:.2f}", 
+         columns=["Skew", "Kurt"]) 
+    .tab_source_note(source_note="Note: Interest rates are expressed as monthly equivalents (Annual Rate / 12).")
+)
+GTTTdes2
+```
+
+# TIMELINE PLOTS
+
+```{python}
+#| label: plot1
+#| layout-ncol: 1
+
+STYLE = {'spot': {'color': '#1a1a2e', 'lw': 1.0},
+ 'ds': {'color': '#e94560', 'lw': 0.8},
+ 'ir_jp': {'color': '#0f3460', 'lw': 1.2},
+ 'ir_us': {'color': '#e94560', 'lw': 1.2},
+ 'diff': {'color': '#533483', 'lw': 1.2},
+ 'zero': {'color': 'black', 'lw': 0.6, 'ls': '--', 'alpha': 0.4}}
+
+def style_ax(ax, title, ylabel, xlabel="Date"):
+    ax.set_facecolor("#ffffff")
+    ax.set_title(title, fontsize=14, fontweight="bold", pad=6, loc="left")
+    ax.set_ylabel(ylabel, fontsize=9)
+    ax.set_xlabel(xlabel, fontsize=9)
+    ax.tick_params(axis="both", labelsize=8)
+    ax.xaxis.set_minor_locator(AutoMinorLocator())
+    ax.grid(which="major", color="#e0e0e0", lw=0.6)
+    ax.grid(which="minor", color="#f0f0f0", lw=0.3)
+    ax.spines[["top", "right"]].set_visible(False)
+
+plt.figure(figsize=(10, 4))
+ax = plt.gca()
+ax.plot(df_plot["Date"], df_plot["Spot"], **STYLE["spot"])
+style_ax(ax, title = "JPY/USD Spot Exchange Rate", ylabel = "JPY per USD")
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(10, 4))
+ax = plt.gca()
+ax.plot(df_plot["Date"], df_plot["IR_JP"]*100, label="Japan 12M", **STYLE["ir_jp"])
+ax.plot(df_plot["Date"], df_plot["IR_US"]*100, label="US 12M", **STYLE["ir_us"])
+ax.legend(fontsize=8, framealpha=0.8, loc="upper left")
+style_ax(ax, "12-Month Interest Rates (%)", ylabel = "Rate (%)")
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(10, 4))
+ax = plt.gca()
+ax.plot(df_plot["Date"], df_plot["Diff"]*100, **STYLE["diff"])
+ax.axhline(0, **STYLE["zero"])
+ax.fill_between(df_plot["Date"], df_plot["Diff"]*100, 0, where=df_plot["Diff"] >= 0, alpha=0.2, color="#0f3460")
+ax.fill_between(df_plot["Date"], df_plot["Diff"]*100, 0, where=df_plot["Diff"] < 0,  alpha=0.2, color="#e94560")
+style_ax(ax, "Interest Rate Differential: Japan − US (%)", ylabel="Differential (%)")
+plt.tight_layout()
+plt.show()
+
+```
+
+# OLS
+
+UIP REGRESSION: 
+
+$$
+dS_t = \alpha + \beta*(i_{JP} - i_{US})_{t-1} + \varepsilon _t
+$$
+
+```{python}
+#| label: ols
+reg = df[[main_y, "Diff_lag"]].dropna().copy()
+
+y = reg[main_y]
+X = sm.add_constant(reg["Diff_lag"])
+
+ols = sm.OLS(y, X).fit()
+
+ols.summary()
+```
+
+
+```{python}
+#| label: NW tests
+NW_LAGS = 10   # Newey-West lags (rule of thumb: 4*(T/100)^(2/9) ≈ 10 for T~4000)
+nw  = ols.get_robustcov_results(cov_type="HAC", maxlags=NW_LAGS, use_correction=True)
+
+alpha_hat = ols.params["const"]
+beta_hat  = ols.params["Diff_lag"]
+T_reg     = int(ols.nobs)
+
+def t_test(estimate, se, h0_value, label):
+    t_stat = (estimate - h0_value) / se
+    p_val  = 2 * stats.t.sf(abs(t_stat), df=T_reg - 2)
+    return {"Hypothesis": label, "Estimate": round(estimate, 6),
+            "H0 Value": h0_value, "Std Error": round(se, 6),
+            "t-stat": round(t_stat, 4), "p-value": round(p_val, 4),
+            "Reject H0 (5%)?": "YES" if p_val < 0.05 else "NO"}
+
+# Standard OLS s.e.
+ols_se_a = ols.bse[0]
+ols_se_b = ols.bse[1]
+
+# Newey-West s.e.
+nw_se_a  = nw.bse[0]
+nw_se_b  = nw.bse[1]
+
+tests_ols = [
+    t_test(alpha_hat, ols_se_a, 0, "H0: alpha = 0  (OLS SE)"),
+    t_test(beta_hat,  ols_se_b, 1, "H0: beta  = 1  (OLS SE)"),
+]
+tests_nw = [
+    t_test(alpha_hat, nw_se_a, 0, "H0: alpha = 0  (NW SE)"),
+    t_test(beta_hat,  nw_se_b, 1, "H0: beta  = 1  (NW SE)"),
+]
+
+# Joint Wald test: alpha=0 AND beta=1 simultaneously (Newey-West)
+R = np.array([[1, 0],
+              [0, 1]])
+r = np.array([0, 1])
+
+# wald_nw = nw.wald_test(sm.stats.contrast.ContrastResults, np.eye(2))
+# Manual Wald using NW covariance
+theta = np.array([alpha_hat, beta_hat])
+r_vec = np.array([0, 1])
+R_mat = np.eye(2)
+diff  = R_mat @ theta - r_vec
+V     = nw.cov_params()
+W     = diff @ np.linalg.inv(R_mat @ V @ R_mat.T) @ diff
+wald_p = 1 - stats.chi2.cdf(W, df=2)
+
+print(f"  T = {T_reg}  |  Newey-West lags = {NW_LAGS}")
+print(f"\n  alpha (intercept) = {alpha_hat:.6f}")
+print(f"  beta  (slope)     = {beta_hat:.6f}")
+print(f"  R-squared         = {ols.rsquared:.6f}")
+print(f"  Adj. R-squared    = {ols.rsquared_adj:.6f}")
+
+
+print("\n--- Individual t-tests ---")
+for t in tests_ols + tests_nw:
+    print(f"  {t['Hypothesis']:<38}  t={t['t-stat']:>8.4f}  p={t['p-value']:.4f}  "
+          f"Reject? {t['Reject H0 (5%)?']}")
+
+print(f"\n--- Joint Wald test: alpha=0 AND beta=1 (Newey-West) ---")
+print(f"  Chi2(2) = {W:.4f}   p-value = {wald_p:.4f}   "
+      f"Reject H0 (5%)? {'YES' if wald_p < 0.05 else 'NO'}")
+```
+
+## Rolling regression
+Performing a rolling regression is a tool to see how the $\beta$ coefficient of the UIP equation evolves. Over 15 years, you are likely to see it swing between negative (the Fama Puzzle) and positive (the "New Fama" or fundamental regime).
+```{python}
+#| label: rolling daily
+#| layout-ncol: 1
+from statsmodels.regression.rolling import RollingOLS
+y = reg[main_y]
+X = sm.add_constant(reg['Diff_lag']*100)
+
+# Define the window size 
+window_size = 180  # 1/2 year of daily data 
+
+# Run the rolling regression
+model = RollingOLS(y, X, window=window_size)
+rolling_res = model.fit()
+rolling_r2 = rolling_res.rsquared
+
+# 4. Extract the coefficients (beta) and the 95% (1.96 is alpha/2) confidence intervals
+params = rolling_res.params['Diff_lag']
+std_err = rolling_res.bse['Diff_lag']
+upper_ci = params + (1.96 * std_err)
+lower_ci = params - (1.96 * std_err)
+
+# 5. Plotting
+plt.figure(figsize=(12, 6))
+plt.plot(df["Date"].drop(1), params, label='Rolling Beta (UIP Coefficient)', color='blue')
+# plt.plot(rolling_r2, label='Rolling R^2', color='black')
+plt.fill_between(df["Date"].drop(1), lower_ci, upper_ci, color='blue', alpha=0.1, label='95% CI')
+plt.axhline(y=1, color='red', linestyle='--', label='Theoretical UIP (Beta=1)')
+plt.axhline(y=0, color='black', linewidth=0.8)
+plt.title(f'Rolling UIP Regression ({window_size}-Period Window)')
+plt.legend()
+
+import ruptures as rpt
+
+
+points = params.dropna().values
+df["rollBETA"] = np.concat([[np.nan] *(window_size), points])
+# 2. Use the "Pelt" algorithm to find breaks in the mean of the Beta
+# 'model="l2"' looks for shifts in the average value of the beta
+algo = rpt.Pelt(model="l2").fit(points)
+result = algo.predict(pen=10) # 'pen' controls how 'strict' it is about finding a break
+
+# You can then map these indices back to your dataframe dates.
+break_dates = params.dropna().index[result[:-1]]
+
+for i, b_date in enumerate(break_dates):
+    plt.axvline(x=df[df.index == b_date]["Date"], color='darkorange', linestyle=':', lw=2, label='Structural Break' if i == 0 else "")
+plt.grid(alpha=0.3)
+plt.legend()
+plt.show()
+
+df[df.index.isin(break_dates)]
+```
+
+**Possible explanation for turnoil in 2012-2014**
+
+In 2012, US-Japan relations faced instability driven by Japan's domestic political turbulence, economic recession, and contentious base realignment issues in Okinawa. Japan’s rapid leadership turnover and high debt created uncertainty, while disputes over the Futenma air station relocation strained security cooperation amidst rising regional tensions with China. 
+
+In 2013, US-Japan relations faced instability largely driven by rising maritime tensions between Japan and China over the Senkaku Islands, causing concern that the US-Japan security alliance could be drawn into a conflict. Prime Minister Shinzo Abe sought stronger assurances of US defense, but tensions were exacerbated by regional disputes, economic concerns, and anxieties over the reliability of US protection. 
+
+In 2014, U.S.-Japan relations were marked by tension over trade negotiations, specifically the Trans-Pacific Partnership (TPP) and agricultural tariffs. Other factors included Japan's security challenges with China, disagreements over hosting U.S. troops, and Japan's push for a "Proactive Contribution to Peace"
+
+## Does UIP work better for daily data turned into monthly?
+
+```{python}
+#| label: monthly
+df_monthly = df.resample('ME', on='Date')[['Spot', 'IR_JP', 'IR_US']].last().reset_index()
+df_monthly["Diff"] = df_monthly["IR_JP"] - df_monthly["IR_US"]
+df_monthly["Diff_lag"] = df_monthly["Diff"].shift(1)
+df_monthly["dS"] = np.log(df_monthly["Spot"]).diff()                      # in log
+df_monthly["dSp"] = df_monthly["Spot"]/df_monthly["Spot"].shift(1)-1      # in %  
+reg = df_monthly[[main_y, "Diff_lag"]].dropna().copy()
+
+y = reg[main_y]
+X = sm.add_constant(reg["Diff_lag"])
+
+ols = sm.OLS(y, X).fit()
+
+ols.summary()
+```
+
+```{python}
+#| label: monthly tests
+#| include: false
+NW_LAGS = 10   # Newey-West lags (rule of thumb: 4*(T/100)^(2/9) ≈ 10 for T~4000)
+nw  = ols.get_robustcov_results(cov_type="HAC", maxlags=NW_LAGS, use_correction=True)
+
+alpha_hat = ols.params["const"]
+beta_hat  = ols.params["Diff_lag"]
+T_reg     = int(ols.nobs)
+
+# Standard OLS s.e.
+ols_se_a = ols.bse[0]
+ols_se_b = ols.bse[1]
+
+# Newey-West s.e.
+nw_se_a  = nw.bse[0]
+nw_se_b  = nw.bse[1]
+
+tests_ols = [
+    t_test(alpha_hat, ols_se_a, 0, "H0: alpha = 0  (OLS SE)"),
+    t_test(beta_hat,  ols_se_b, 1, "H0: beta  = 1  (OLS SE)"),
+]
+tests_nw = [
+    t_test(alpha_hat, nw_se_a, 0, "H0: alpha = 0  (NW SE)"),
+    t_test(beta_hat,  nw_se_b, 1, "H0: beta  = 1  (NW SE)"),
+]
+
+# Joint Wald test: alpha=0 AND beta=1 simultaneously (Newey-West)
+R = np.array([[1, 0],
+              [0, 1]])
+r = np.array([0, 1])
+
+# wald_nw = nw.wald_test(sm.stats.contrast.ContrastResults, np.eye(2))
+# Manual Wald using NW covariance
+theta = np.array([alpha_hat, beta_hat])
+r_vec = np.array([0, 1])
+R_mat = np.eye(2)
+diff  = R_mat @ theta - r_vec
+V     = nw.cov_params()
+W     = diff @ np.linalg.inv(R_mat @ V @ R_mat.T) @ diff
+wald_p = 1 - stats.chi2.cdf(W, df=2)
+
+print(f"  T = {T_reg}  |  Newey-West lags = {NW_LAGS}")
+print(f"\n  alpha (intercept) = {alpha_hat:.6f}")
+print(f"  beta  (slope)     = {beta_hat:.6f}")
+print(f"  R-squared         = {ols.rsquared:.6f}")
+print(f"  Adj. R-squared    = {ols.rsquared_adj:.6f}")
+
+
+print("\n--- Individual t-tests ---")
+for t in tests_ols + tests_nw:
+    print(f"  {t['Hypothesis']:<38}  t={t['t-stat']:>8.4f}  p={t['p-value']:.4f}  "
+          f"Reject? {t['Reject H0 (5%)?']}")
+
+print(f"\n--- Joint Wald test: alpha=0 AND beta=1 (Newey-West) ---")
+print(f"  Chi2(2) = {W:.4f}   p-value = {wald_p:.4f}   "
+      f"Reject H0 (5%)? {'YES' if wald_p < 0.05 else 'NO'}")
+```
+
+```{python}
+#| label: bigtable
+# Create the data
+#| html-table-processing: none
+
+data = {
+    "Parameter": ["α (Constant)", "β (IR Diff, lagged)"],
+    "Estimate": [0.000179, 0.018355],
+    "Std Error (NW)": [0.000121, 0.000663],
+    "t-stat (H₀: α=0 β=1)": [1.48, -14.82],
+    "p-value": ["0.174", "< 0.001"]
+}
+
+cooldata = pd.DataFrame(data)
+
+# Create GT table
+GTTTtest1 = (
+    GT(cooldata)
+    .tab_header(title="UIP Regression Results")
+    .opt_stylize(5, "gray")
+)
+
+GTTTtest1
+```
+
+```{python}
+#| label: bigtable2
+#| html-table-processing: none
+
+# Create the table data
+data = {
+    "Hypothesis": [
+        "H₀: α = 0",
+        "H₀: β = 1 (NW SE)",
+        "H₀: α=0 & β=1 (Wald)",
+        "Monthly: H₀: β = 1 (NW SE)",
+        "Monthly: H₀: α=0 & β=1 (Wald)"
+    ],
+    "Test Statistic": [
+        f"t = 1.48",
+        f"t = -14.82",
+        f"χ² = 438.97",
+        f"t = -0.514",
+        f"t = 6.008"
+    ],
+    "p-value": [
+        f"0.174",
+        f"< 0.001",
+        f"< 0.001",
+        f"0.608",
+        f"0.042"
+    ],
+    "Decision": [
+        "Fail to Reject",
+        "Strongly Rejected",
+        "Strongly Rejected",
+        "Fail to Reject",
+        "Rejected"
+    ]
+}
+
+cooldata = pd.DataFrame(data)
+
+# Build GT table
+GTTTtest2 = (
+    GT(cooldata)
+    .tab_header(title="Hypothesis Tests for UIP")
+    .opt_stylize(5, "gray")
+)
+
+GTTTtest2
+```
+
+```{python}
+#| layout-ncol: 1
+#| label: monthly rolling
+y = reg[main_y]
+X = sm.add_constant(reg['Diff_lag']*100)
+
+# Define the window size 
+window_size = 6  # 1/2 year 
+
+# Run the rolling regression
+model = RollingOLS(y, X, window=window_size)
+rolling_res = model.fit()
+rolling_r2 = rolling_res.rsquared
+
+# 4. Extract the coefficients (beta) and the 95% (1.96 is alpha/2) confidence intervals
+params = rolling_res.params['Diff_lag']
+std_err = rolling_res.bse['Diff_lag']
+
+# 5. Plotting
+plt.figure(figsize=(12, 6))
+plt.plot(df_monthly["Date"].drop(1), params, label='Rolling Beta (UIP Coefficient)', color='blue')
+plt.axhline(y=1, color='red', linestyle='--', label='Theoretical UIP (Beta=1)')
+plt.axhline(y=0, color='black', linewidth=0.8)
+plt.title(f'Rolling UIP Regression ({window_size}-Period Window)')
+plt.legend()
+
+points = params.dropna().values
+df_monthly["rollBETA"] = np.concat([[np.nan] *(window_size), points])
+# 2. Use the "Pelt" algorithm to find breaks in the mean of the Beta
+# 'model="l2"' looks for shifts in the average value of the beta
+algo = rpt.Pelt(model="l2").fit(points)
+result = algo.predict(pen=10) # 'pen' controls how 'strict' it is about finding a break
+
+# You can then map these indices back to your dataframe dates.
+break_dates = params.dropna().index[result[:-1]]
+
+for i, b_date in enumerate(break_dates):
+    plt.axvline(x=df_monthly[df_monthly.index == b_date]["Date"], color='darkorange', linestyle=':', lw=2, label='Structural Break' if i == 0 else "")
+plt.grid(alpha=0.3)
+plt.legend()
+plt.show()
+
+df_monthly[df_monthly.index.isin(break_dates)]
+```
+
+We see that using monthly data it holds better but never consistently at the $\beta = 1$ levels needed to confirm the existance of UIP in the dataset
+
+
+```{python}
+#| label: strat
+#| layout-ncol: 1
+#| html-table-processing: none
+
+# Most carry trades use (Target_Rate - Funding_Rate)
+df['Daily_Carry'] = (df['IR_US'] - df['IR_JP']) *12/252
+
+# Total Daily Return = Interest Income + Spot Capital Gain
+# Note: If USD/JPY (Spot) goes UP, the USD has appreciated = Profit
+df['Strategy_Return'] = df['Daily_Carry'] + df[main_y]
+
+# --- 2. Calculate Performance ---
+# Calculate cumulative growth of $1
+df['Cumulative_Carry_Return'] = (1 + df['Strategy_Return']).cumprod()
+df['Cumulative_Spot_Only'] = (1 + df[main_y]).cumprod() # For comparison
+
+# --- 3. Risk Metrics ---
+ann_return = df['Strategy_Return'].mean() * 252
+ann_vol = df['Strategy_Return'].std() * np.sqrt(252)
+sharpe = ann_return / ann_vol
+
+# Maximum Drawdown
+rolling_max = df['Cumulative_Carry_Return'].cummax()
+drawdown = (df['Cumulative_Carry_Return'] - rolling_max) / rolling_max
+max_dd = drawdown.min()
+
+# --- 4. Plotting ---
+plt.figure(figsize=(12, 6))
+plt.plot(df['Date'], df['Cumulative_Carry_Return'], label='Carry Trade (Interest + Spot)', color='green', lw=2)
+plt.plot(df['Date'], df['Cumulative_Spot_Only'], label='Spot Only', color='gray', alpha=0.5, linestyle='--')
+
+plt.title(f'JPY/USD Carry Trade Performance ($\\beta=0$ Assumption)', fontsize=14)
+plt.ylabel('Value of $1 Investment')
+plt.legend()
+plt.grid(alpha=0.3)
+plt.show()
+
+GTTTstrat1 = (
+  GT(pd.DataFrame({"STATS" : ["Annualized Return", "Annualized Vol", "Sharpe Ratio", "Max Drawdown"], 
+                    "VALS" : [ann_return, ann_vol, sharpe, max_dd]}))
+  .fmt_percent(columns="VALS")
+  .opt_stylize(5,"gray")
+  .tab_header("Normal Carry Trade Strategy")
+)
+
+GTTTstrat1
+```

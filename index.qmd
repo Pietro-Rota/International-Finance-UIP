@@ -1,0 +1,1018 @@
+---
+title: "Uncovered Interest Rate Parity (UIRP) Analysis"
+editor: source
+format:
+  html: 
+    page-layout: article
+    code-tools: true
+    code-fold: true
+    code-summary: "Show code"
+    df-print: kable
+    code-block-border-left: "royalblue"
+    code-block-bg: true
+    toc: true
+    self-contained: true
+    embed-resources: true
+
+  # typst:
+  #   latex-engine: xelatex
+  #   embed-resources: true
+  #   code-block: false
+  #   citation-package: natbib
+  #   includes:
+  #     in-header: header.tex
+  #   code-tools: true
+  #   code-fold: true
+  #   df-print: kable
+  #   number-sections: true
+toc-depth: 2
+fig-align: center
+number-sections: true
+lang: en
+author:
+  - name: Pietro Rota
+    affiliation:
+      - name: Bayes Business School – City, St George’s University of London
+        city: London
+        state: UK
+        url: https://www.bayes.citystgeorges.ac.uk/
+---
+
+
+# Introduction
+Currency Pair: JPY/USD | Frequency: Daily | Rates: 12-Month Money Market
+
+```{python}
+#| label: import
+from great_tables import GT
+import selenium
+import playwright
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+from matplotlib.ticker import AutoMinorLocator
+import warnings
+warnings.filterwarnings("ignore")
+import statsmodels.api as sm
+from scipy import stats
+
+plt.rcParams["figure.constrained_layout.use"] = True
+# violin plot 
+import ptitprince as pt
+import seaborn as sns
+```
+
+## LOAD DATA
+
+```{python}
+#| label: data
+FILE_PATH = "C:\\Users\\pietr\\OneDrive - City St George's, University of London\\Documents\\a2025-2026 BAYES\\IF - International Finance\\IF - Course Work\\DATA UIP OFFLINE.xlsx"
+
+SJU = pd.read_excel(FILE_PATH, sheet_name = "USDJPY",  skiprows=5)
+IU  = pd.read_excel(FILE_PATH, sheet_name = "USD 12M", skiprows=5)
+IJ  = pd.read_excel(FILE_PATH, sheet_name = "JPY 12M", skiprows=5)
+
+sju_clean = SJU[['Date', 'PX_LAST']].rename(columns={'PX_LAST': 'Spot_Rate'})
+iu_clean  = IU[['Date', 'PX_LAST']].rename(columns={'PX_LAST': 'USD_12M'})
+ij_clean  = IJ[['Date', 'PX_LAST']].rename(columns={'PX_LAST': 'JPY_12M'})
+
+# 3. Merge them step-by-step
+df = pd.merge(sju_clean, iu_clean, on='Date', how='left')
+df = pd.merge(df, ij_clean, on='Date', how='left')
+
+df.columns = ["Date", "Spot", "IR_US", "IR_JP"]
+df = df.dropna().sort_values("Date").reset_index(drop=True)
+
+divider = 1 / 12 / 100
+df["IR_JP"] = df["IR_JP"] * divider
+df["IR_US"] = df["IR_US"] * divider
+
+df
+```
+
+```{python}
+#| label: main_y
+main_y = "dS"
+
+if main_y == "dS" : 
+    print(f"This regression is using {main_y} which means Log change") 
+elif main_y == "dSp":
+    print(f"This regression is using {main_y} which means Percentage change") 
+else : 
+    print("That LTG gif")
+```
+
+## DERIVED SERIES
+
+Note on the interest rate differential we are using  Japan minus US not because we are representing japan but because thats how our exchange rate is structured in how many yen does it take to get a dollar
+
+```{python}
+#| label: var creation
+# Log change in exchange rate (JPY/USD): positive = JPY depreciation
+df["dS"] = np.log(df["Spot"]).diff()              # in log
+df["dSp"] = df["Spot"]/df["Spot"].shift(1)-1      # in %  
+
+# Interest rate differential: Japan minus US (domestic - foreign)
+df["Diff"] = (df["IR_JP"] - df["IR_US"])
+df["Diff_lag"] = df["Diff"].shift(1)
+
+
+df_plot = df.dropna().copy()
+
+T = len(df)
+print(f"Sample: {df.iloc[0]["Date"].strftime("%Y-%m-%d")} -> {df.iloc[len(df)-1]["Date"].strftime("%Y-%m-%d")}  |  T = {T}\n")
+```
+
+# DESCRIPTIVE STATISTICS
+
+```{python}
+#| label: destable
+desc_vars = {
+    "Spot Rate (JPY/USD)"         : df_plot["Spot"],
+    "Log ΔSpot"                   : df_plot["dS"],
+    "% ΔSpot"                     : df_plot["dSp"],
+    "Japan 12M Rate"               : df_plot["IR_JP"],
+    "US 12M Rate"                  : df_plot["IR_US"],
+    "Interest Rate Diff (JP-US)"  : df_plot["Diff"],
+}
+
+stats_rows = []
+for label, series in desc_vars.items():
+    stats_rows.append({
+        "Series"    : label,
+        "Obs"       : int(series.count()),
+        "Mean"      : series.mean(),
+        "Std Dev"   : series.std(),
+        "Min"       : series.min(),
+        "25%"       : series.quantile(0.25),
+        "Median"    : series.median(),
+        "75%"       : series.quantile(0.75),
+        "Max"       : series.max(),
+        "Skewness"  : series.skew(),
+        "Kurtosis"  : series.kurt(),
+        
+    })
+
+stats_df = pd.DataFrame(stats_rows).set_index("Series")
+
+
+stats_df.columns = ['Count', 'Mean', 'Std', 'Min', '25%', '50%', '75%', 'Max', 'Skew', 'Kurt']
+stats_df["Name"] = stats_df.index
+
+GTTTdes = (
+    GT(stats_df)
+    .cols_move_to_start(columns="Name")
+    .tab_header(title="Descriptive Statistics")
+    .opt_stylize(5, color = "gray")
+    .fmt_integer(columns = "Count")
+    .fmt(lambda x: f"{x:.2%}", rows= [1,2,3,4,5], columns=['Mean', 'Std', 'Min', '25%', '50%', '75%', 'Max', "Skew", "Kurt"])
+    .fmt(lambda x: f"{x:.2f}", rows= [0], columns=['Mean', 'Std', 'Min', '25%', '50%', '75%', 'Max', "Skew", "Kurt"])
+)
+GTTTdes
+```
+
+```{python}
+# 1. Update labels to be explicit about units and frequency
+desc_vars = {
+    "Spot Rate (JPY/USD)"         : df_plot["Spot"],
+    "Log ΔSpot (Daily)"           : df_plot["dS"],
+    "Japan IR (Monthly equiv.)"   : df_plot["IR_JP"],
+    "US IR (Monthly equiv.)"      : df_plot["IR_US"],
+    "Interest Rate Diff (JP-US)"  : df_plot["Diff"],
+}
+
+stats_rows = []
+for label, series in desc_vars.items():
+    stats_rows.append({
+        "Series"    : label,
+        "Obs"       : int(series.count()),
+        "Mean"      : series.mean(),
+        "Std Dev"   : series.std(),
+        "Min"       : series.min(),
+        "25%"       : series.quantile(0.25),
+        "Median"    : series.median(),
+        "75%"       : series.quantile(0.75),
+        "Max"       : series.max(),
+        "Skewness"  : series.skew(),
+        "Kurtosis"  : series.kurt(),
+        
+    })
+
+stats_df = pd.DataFrame(stats_rows).set_index("Series")
+
+
+stats_df.columns = ['Count', 'Mean', 'Std', 'Min', '25%', '50%', '75%', 'Max', 'Skew', 'Kurt']
+stats_df["Name"] = stats_df.index
+
+# 2. Refined GT Formatting
+GTTTdes2 = (
+    GT(stats_df)
+    .cols_move_to_start(columns="Name")
+    .tab_header(
+        title="Descriptive Statistics",
+        subtitle="Sample Period: March 2010 – March 2026"
+    )
+    .opt_stylize(5, color = "gray")
+    .fmt_integer(columns = "Count")
+    # Format Rates and Changes as Percentages
+    .fmt(lambda x: f"{x:.3%}", 
+         rows=[1,2,3,4], 
+         columns=['Mean', 'Std', 'Min', '25%', '50%', '75%', 'Max'])
+    # Format Spot Rate, Skew, and Kurtosis as standard floats (NOT percentages)
+    .fmt(lambda x: f"{x:.2f}", 
+         rows=[0], 
+         columns=['Mean', 'Std', 'Min', '25%', '50%', '75%', 'Max'])
+    .fmt(lambda x: f"{x:.2f}", 
+         columns=["Skew", "Kurt"]) 
+    .tab_source_note(source_note="Note: Interest rates are expressed as monthly equivalents (Annual Rate / 12).")
+)
+GTTTdes2
+```
+
+Mixed violin and box plot 
+```{python}
+#| label: violinplot
+#| layout-ncol: 1
+df = df.rename(columns={'IR_JP': 'Japan', 'IR_US': 'United States'
+                        , 'dSp': 'Percentage Change Exchange', 'dS': 'Log Change Exchange'
+                        })
+
+melted = df[["Japan", "United States", "Diff", 'Percentage Change Exchange', 'Log Change Exchange']].melt(var_name="Asset", value_name="Return")
+plt.figure(figsize=(8, 6))
+
+pt.half_violinplot(
+    x="Asset",
+    y="Return",
+    data=melted,
+    palette="tab10",
+    bw=0.2,
+    cut=0.0,
+    scale="area",
+    inner=None,
+    orient="v",
+)
+sns.boxplot(
+    data=melted,
+    x="Asset",
+    y="Return",
+    width=0.2,
+    palette="tab10",
+    showcaps=True,
+    flierprops=dict(
+        marker="o", markerfacecolor="black", markersize=2, linestyle="none"
+    ),
+    # showfliers=False
+)
+# 1. Horizontal Line at y=0 (Zero Return)
+plt.axhline(
+    y=0,
+    color="black",
+    linestyle="--",
+    linewidth=0.8,
+    alpha=0.7,
+    label="Zero Return",  # Adding a label is good practice
+)
+# 2. Vertical Lines to separate Assets/Boxplots
+for i in range(9):  # 10 - 1
+    plt.axvline(
+        x=i + 0.5,  # Place the line exactly between asset i and asset i+1
+        color="gray",
+        linestyle="-",
+        linewidth=0.5,
+        alpha=0.5,
+    )
+
+plt.title("Violin + Boxplot")
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
+df = df.rename(columns={'Japan': 'IR_JP', 'United States': 'IR_US' 
+                        , 'Percentage Change Exchange' : 'dSp', 'Log Change Exchange': 'dS'
+                        })
+```
+
+# TIMELINE PLOTS
+
+```{python}
+#| label: plot1
+#| layout-ncol: 1
+
+STYLE = {'spot': {'color': '#1a1a2e', 'lw': 1.0},
+ 'ds': {'color': '#e94560', 'lw': 0.8},
+ 'ir_jp': {'color': '#0f3460', 'lw': 1.2},
+ 'ir_us': {'color': '#e94560', 'lw': 1.2},
+ 'diff': {'color': '#533483', 'lw': 1.2},
+ 'zero': {'color': 'black', 'lw': 0.6, 'ls': '--', 'alpha': 0.4}}
+
+def style_ax(ax, title, ylabel, xlabel="Date"):
+    ax.set_facecolor("#ffffff")
+    ax.set_title(title, fontsize=14, fontweight="bold", pad=6, loc="left")
+    ax.set_ylabel(ylabel, fontsize=9)
+    ax.set_xlabel(xlabel, fontsize=9)
+    ax.tick_params(axis="both", labelsize=8)
+    ax.xaxis.set_minor_locator(AutoMinorLocator())
+    ax.grid(which="major", color="#e0e0e0", lw=0.6)
+    ax.grid(which="minor", color="#f0f0f0", lw=0.3)
+    ax.spines[["top", "right"]].set_visible(False)
+
+plt.figure(figsize=(10, 4))
+ax = plt.gca()
+ax.plot(df_plot["Date"], df_plot["Spot"], **STYLE["spot"])
+style_ax(ax, title = "JPY/USD Spot Exchange Rate", ylabel = "JPY per USD")
+plt.tight_layout()
+plt.show()
+
+
+plt.figure(figsize=(12, 6))
+ax = plt.gca()
+ax.plot(df_plot["Date"], df_plot["dSp"], **STYLE["ds"], alpha=0.75)
+ax.axhline(0, **STYLE["zero"])
+ax.fill_between(df_plot["Date"], df_plot["dSp"], 0, where=df_plot["dSp"] >= 0, alpha=0.15, color="#e94560")
+ax.fill_between(df_plot["Date"], df_plot["dSp"], 0, where=df_plot["dSp"] < 0,  alpha=0.15, color="#1a1a2e")
+style_ax(ax, "Daily Log Change in Spot Rate (ΔS, %)", ylabel = "% Change", )
+plt.tight_layout()
+plt.show()
+```
+
+Combined charts
+
+```{python}
+#| label: plots1combined
+#| layout-ncol: 1
+
+# Create the figure and the first axis (Left)
+fig, ax1 = plt.subplots(figsize=(10, 5))
+
+# 1. Plot Spot Exchange Rate on the Left Axis
+line1 = ax1.plot(df_plot["Date"], df_plot["Spot"], **STYLE["spot"], label="JPY/USD Spot")
+style_ax(ax1, title="JPY/USD Spot and Interest Rates", ylabel="JPY per USD")
+
+# 2. Create the Right Axis for Interest Rates
+ax2 = ax1.twinx()
+line2 = ax2.plot(df_plot["Date"], df_plot["IR_JP"]*100, **STYLE["ir_jp"], label="Japan IR")
+line3 = ax2.plot(df_plot["Date"], df_plot["IR_US"]*100, **STYLE["ir_us"], label="US IR")
+
+# Style the Right Axis
+ax2.set_ylabel("Interest Rate (%)", fontsize=9)
+ax2.tick_params(axis='y', labelsize=8)
+ax2.spines["top"].set_visible(False)
+# Ensure the right spine is visible for the secondary axis
+ax2.spines["right"].set_visible(True)
+
+# 3. Combine legends from both axes
+lines = line1 + line2 + line3
+labels = [l.get_label() for l in lines]
+ax1.legend(lines, labels, loc='upper left', fontsize=8, frameon=True, facecolor='white')
+
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+#| label: plots1 not combined
+#| layout-ncol: 1
+#| echo: false
+plt.figure(figsize=(10, 4))
+ax = plt.gca()
+ax.plot(df_plot["Date"], df_plot["IR_JP"]*100, label="Japan 12M", **STYLE["ir_jp"])
+ax.plot(df_plot["Date"], df_plot["IR_US"]*100, label="US 12M", **STYLE["ir_us"])
+ax.legend(fontsize=8, framealpha=0.8, loc="upper left")
+style_ax(ax, "12-Month Interest Rates (%)", ylabel = "Rate (%)")
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(10, 4))
+ax = plt.gca()
+ax.plot(df_plot["Date"], df_plot["Diff"]*100, **STYLE["diff"])
+ax.axhline(0, **STYLE["zero"])
+ax.fill_between(df_plot["Date"], df_plot["Diff"]*100, 0, where=df_plot["Diff"] >= 0, alpha=0.2, color="#0f3460")
+ax.fill_between(df_plot["Date"], df_plot["Diff"]*100, 0, where=df_plot["Diff"] < 0,  alpha=0.2, color="#e94560")
+style_ax(ax, "Interest Rate Differential: Japan − US (%)", ylabel="Differential (%)")
+plt.tight_layout()
+plt.show()
+
+```
+
+```{python}
+#| label: diff plot
+#| layout-ncol: 2
+plt.figure(figsize=(6, 5))
+ax = plt.gca()
+ax.plot(df_plot["Date"], df_plot["IR_JP"]*100, label="Japan 12M", **STYLE["ir_jp"])
+ax.plot(df_plot["Date"], df_plot["IR_US"]*100, label="US 12M", **STYLE["ir_us"])
+ax.legend(fontsize=8, framealpha=0.8, loc="upper left")
+style_ax(ax, "12-Month Interest Rates (%)", ylabel = "Rate (%)")
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(6, 5))
+ax = plt.gca()
+ax.plot(df_plot["Date"], df_plot["Diff"]*100, **STYLE["diff"])
+ax.axhline(0, **STYLE["zero"])
+ax.fill_between(df_plot["Date"], df_plot["Diff"]*100, 0, where=df_plot["Diff"] >= 0, alpha=0.2, color="#0f3460")
+ax.fill_between(df_plot["Date"], df_plot["Diff"]*100, 0, where=df_plot["Diff"] < 0,  alpha=0.2, color="#e94560")
+style_ax(ax, "Interest Rate Differential: Japan − US (%)", ylabel="Differential (%)")
+plt.tight_layout()
+plt.show()
+```
+
+# OLS
+
+UIP REGRESSION: 
+
+$$
+dS_t = \alpha + \beta*(i_{JP} - i_{US})_{t-1} + \varepsilon _t
+$$
+
+```{python}
+#| label: ols
+reg = df[[main_y, "Diff_lag"]].dropna().copy()
+
+y = reg[main_y]
+X = sm.add_constant(reg["Diff_lag"])
+
+ols = sm.OLS(y, X).fit()
+
+ols.summary()
+```
+
+
+```{python}
+#| label: NW tests
+NW_LAGS = 10   # Newey-West lags (rule of thumb: 4*(T/100)^(2/9) ≈ 10 for T~4000)
+nw  = ols.get_robustcov_results(cov_type="HAC", maxlags=NW_LAGS, use_correction=True)
+
+alpha_hat = ols.params["const"]
+beta_hat  = ols.params["Diff_lag"]
+T_reg     = int(ols.nobs)
+
+def t_test(estimate, se, h0_value, label):
+    t_stat = (estimate - h0_value) / se
+    p_val  = 2 * stats.t.sf(abs(t_stat), df=T_reg - 2)
+    return {"Hypothesis": label, "Estimate": round(estimate, 6),
+            "H0 Value": h0_value, "Std Error": round(se, 6),
+            "t-stat": round(t_stat, 4), "p-value": round(p_val, 4),
+            "Reject H0 (5%)?": "YES" if p_val < 0.05 else "NO"}
+
+# Standard OLS s.e.
+ols_se_a = ols.bse[0]
+ols_se_b = ols.bse[1]
+
+# Newey-West s.e.
+nw_se_a  = nw.bse[0]
+nw_se_b  = nw.bse[1]
+
+tests_ols = [
+    t_test(alpha_hat, ols_se_a, 0, "H0: alpha = 0  (OLS SE)"),
+    t_test(beta_hat,  ols_se_b, 1, "H0: beta  = 1  (OLS SE)"),
+]
+tests_nw = [
+    t_test(alpha_hat, nw_se_a, 0, "H0: alpha = 0  (NW SE)"),
+    t_test(beta_hat,  nw_se_b, 1, "H0: beta  = 1  (NW SE)"),
+]
+
+# Joint Wald test: alpha=0 AND beta=1 simultaneously (Newey-West)
+R = np.array([[1, 0],
+              [0, 1]])
+r = np.array([0, 1])
+
+# wald_nw = nw.wald_test(sm.stats.contrast.ContrastResults, np.eye(2))
+# Manual Wald using NW covariance
+theta = np.array([alpha_hat, beta_hat])
+r_vec = np.array([0, 1])
+R_mat = np.eye(2)
+diff  = R_mat @ theta - r_vec
+V     = nw.cov_params()
+W     = diff @ np.linalg.inv(R_mat @ V @ R_mat.T) @ diff
+wald_p = 1 - stats.chi2.cdf(W, df=2)
+
+print(f"  T = {T_reg}  |  Newey-West lags = {NW_LAGS}")
+print(f"\n  alpha (intercept) = {alpha_hat:.6f}")
+print(f"  beta  (slope)     = {beta_hat:.6f}")
+print(f"  R-squared         = {ols.rsquared:.6f}")
+print(f"  Adj. R-squared    = {ols.rsquared_adj:.6f}")
+
+
+print("\n--- Individual t-tests ---")
+for t in tests_ols + tests_nw:
+    print(f"  {t['Hypothesis']:<38}  t={t['t-stat']:>8.4f}  p={t['p-value']:.4f}  "
+          f"Reject? {t['Reject H0 (5%)?']}")
+
+print(f"\n--- Joint Wald test: alpha=0 AND beta=1 (Newey-West) ---")
+print(f"  Chi2(2) = {W:.4f}   p-value = {wald_p:.4f}   "
+      f"Reject H0 (5%)? {'YES' if wald_p < 0.05 else 'NO'}")
+```
+
+## REGRESSION PLOTS
+
+```{python}
+#| label: resid plots 
+#| include: false
+#| layout-ncol: 1
+
+resid = ols.resid
+
+NAVY   = "#0d1b2a"
+RED    = "#c1121f"
+TEAL   = "#1b7d8e"
+LGREY  = "#f4f4f4"
+
+plt.figure(figsize=(10, 6))
+ax = plt.gca()
+ax.scatter(reg["Diff_lag"], y, alpha=0.07, s=5, color=NAVY, zorder=2)
+x_line = np.linspace(reg["Diff_lag"].min(), reg["Diff_lag"].max(), 200)
+y_line = alpha_hat + beta_hat * x_line
+y_uip  = 0 + 1.0 * x_line
+ax.plot(x_line, y_line, color=RED,  lw=1.8, label=f"OLS: a={alpha_hat:.3f}, b={beta_hat:.3f}", zorder=3)
+
+ax.plot(x_line, y_uip,  color=TEAL, lw=1.5, ls="--", label="UIP: a=0, b=1", zorder=3)
+ax.legend(fontsize=7.5, framealpha=0.9)
+style_ax(ax, "Scatter: dS vs Lagged IR Differential", "i_JP - i_US (t-1, %)", "Log dS (%)")
+plt.tight_layout()
+plt.show()
+
+
+plt.figure(figsize=(10, 6))
+ax = plt.gca()
+ax.plot(reg.index, resid.values, color=NAVY, lw=0.5, alpha=0.7, zorder=2)
+ax.axhline(0, color=RED, lw=0.8, ls="--", alpha=0.6, zorder=3)
+style_ax(ax, "Residuals Over Time", "Date", "Residual")
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(10, 6))
+ax = plt.gca()
+max_lag = 40
+acf_vals = [resid.autocorr(lag=l) for l in range(1, max_lag + 1)]
+ci = 1.96 / np.sqrt(T_reg)
+lags = np.arange(1, max_lag + 1)
+ax.bar(lags, acf_vals, color=NAVY, alpha=0.6, width=0.7, zorder=2)
+ax.axhline( ci, color=RED, lw=1.0, ls="--", alpha=0.7, label="±1.96/√T")
+ax.axhline(-ci, color=RED, lw=1.0, ls="--", alpha=0.7)
+ax.axhline(0, color="black", lw=0.5, alpha=0.4)
+ax.legend(fontsize=7.5)
+style_ax(ax, "Residual ACF", "Lag", "Autocorrelation")
+plt.tight_layout()
+plt.show()
+
+
+plt.figure(figsize=(10, 6))
+ax = plt.gca()
+n, bins, _ = ax.hist(resid, bins=80, color=NAVY, alpha=0.6, density=True, zorder=2, label="Residuals")
+mu_r, sd_r = resid.mean(), resid.std()
+x_norm = np.linspace(resid.min(), resid.max(), 300)
+ax.plot(x_norm, stats.norm.pdf(x_norm, mu_r, sd_r), color=RED, lw=1.8, label="Normal fit", zorder=3)
+ax.legend(fontsize=7.5)
+style_ax(ax, "Residual Distribution", "Residual", "Density")
+plt.tight_layout()
+plt.show()
+```
+
+## possible theories (AI)
+
+You’re touching on a major area of research in international finance. The consensus is that while UIP fails miserably in the short term (the "Fama Puzzle"), it often looks much better when you zoom out to longer time horizons or look at specific historical "regimes."
+
+Here are the key papers and concepts that explain why the relationship changes over time:
+
+**1. The "Long-Horizon" Effect**
+
+One of the most famous findings is that UIP works better over **5 to 10 years** than it does over 3 to 12 months.
+
+* **Key Paper:** *Meredith and Chinn (1998)*, "Long-Horizon Uncovered Interest Parity."
+* **The Gist:** They found that while the coefficient is often negative for short maturities (3 months), it becomes positive and close to **1.0** (what theory predicts) when using 10-year government bond yields. This suggests that "fundamentals" eventually win out, but short-term noise and speculation dominate the monthly/quarterly data.
+
+**2. The "New Fama Puzzle" (Post-2008)**
+
+Recent research shows that the relationship actually **flipped** after the 2008 Global Financial Crisis (GFC).
+
+* **Key Paper:** *Bussière, Chinn, Ferrara, and Heipertz (2022)*, "The New Fama Puzzle."
+* **The Gist:** They discovered that for many currencies, the famous "negative coefficient" (where high-interest currencies appreciate) disappeared after 2008. In the decade following the crisis, the relationship became positive. This suggests that market behavior changed significantly in a "low-for-long" interest rate environment.
+
+**3. Structural Breaks & Regime Switching**
+
+Instead of one single relationship, some researchers argue that UIP exists in different "states" (e.g., high volatility vs. low volatility).
+
+* **Key Paper:** *Ichiue and Koyama (2011)*, "Regime switches in exchange rate volatility and uncovered interest parity."
+* **The Gist:** They use "Markov Switching Models" to show that UIP tends to hold better during periods of **high exchange rate volatility** or when interest rate differentials are very large. When volatility is low, "carry trades" (borrowing in low-rate currencies to buy high-rate ones) dominate, which intentionally breaks the UIP relationship.
+
+**4. Monetary Policy Targets**
+
+Some argue the failure isn't a market failure, but a result of how Central Banks act.
+
+* **Key Paper:** *McCallum (1994)*, "A Reconsideration of the Uncovered Interest Parity Relationship."
+* **The Gist:** McCallum suggested that because central banks react to exchange rate movements by adjusting interest rates (leaning against the wind), they create a statistical bias that makes UIP look like it’s failing even if investors are behaving rationally.
+
+**Summary Table for Your Testing**
+
+If you are doing your own analysis, you might want to split your data into these common "sub-samples" to see if your results change:
+
+| Period             | Typical Finding     | Why?                                                |
+| ------------------ | ------------------- | --------------------------------------------------- |
+| **Pre-2008**       | Strong Rejection    | Dominance of the "Carry Trade."                     |
+| **2008–2009**      | UIP may hold better | Extreme volatility forces a return to fundamentals. |
+| **Post-2008**      | "New Fama Puzzle"   | Sign switch; relationship becomes more positive.    |
+| **High Vol (VIX)** | Closer to UIP       | Risk premia dominate speculative gains.             |
+
+## Rolling regression
+Performing a rolling regression is an excellent way to see how the "beta" coefficient of the UIP equation evolves. Over 15 years, you are likely to see it swing between negative (the Fama Puzzle) and positive (the "New Fama" or fundamental regime).
+```{python}
+#| label: rolling daily
+#| layout-ncol: 1
+from statsmodels.regression.rolling import RollingOLS
+y = reg[main_y]
+X = sm.add_constant(reg['Diff_lag']*100)
+
+# Define the window size 
+window_size = 180  # 1/2 year of daily data 
+
+# Run the rolling regression
+model = RollingOLS(y, X, window=window_size)
+rolling_res = model.fit()
+rolling_r2 = rolling_res.rsquared
+
+# 4. Extract the coefficients (beta) and the 95% (1.96 is alpha/2) confidence intervals
+params = rolling_res.params['Diff_lag']
+std_err = rolling_res.bse['Diff_lag']
+upper_ci = params + (1.96 * std_err)
+lower_ci = params - (1.96 * std_err)
+
+# 5. Plotting
+plt.figure(figsize=(12, 6))
+plt.plot(df["Date"].drop(1), params, label='Rolling Beta (UIP Coefficient)', color='blue')
+# plt.plot(rolling_r2, label='Rolling R^2', color='black')
+plt.fill_between(df["Date"].drop(1), lower_ci, upper_ci, color='blue', alpha=0.1, label='95% CI')
+plt.axhline(y=1, color='red', linestyle='--', label='Theoretical UIP (Beta=1)')
+plt.axhline(y=0, color='black', linewidth=0.8)
+plt.title(f'Rolling UIP Regression ({window_size}-Period Window)')
+plt.legend()
+
+import ruptures as rpt
+
+
+points = params.dropna().values
+df["rollBETA"] = np.concat([[np.nan] *(window_size), points])
+# 2. Use the "Pelt" algorithm to find breaks in the mean of the Beta
+# 'model="l2"' looks for shifts in the average value of the beta
+algo = rpt.Pelt(model="l2").fit(points)
+result = algo.predict(pen=10) # 'pen' controls how 'strict' it is about finding a break
+
+# You can then map these indices back to your dataframe dates.
+break_dates = params.dropna().index[result[:-1]]
+
+for i, b_date in enumerate(break_dates):
+    plt.axvline(x=df[df.index == b_date]["Date"], color='darkorange', linestyle=':', lw=2, label='Structural Break' if i == 0 else "")
+plt.legend()
+plt.show()
+
+df[df.index.isin(break_dates)]
+```
+
+**How to interpret the "vlines" in your results:**
+
+The Lag Effect: Since you are using a rolling window (e.g., <code>{python}  print(window_size) </code> days), a structural break in the market today will show up gradually in your chart over the next year. The "vlines" mark the point where the average behavior of the past year shifted most significantly.
+
+Beta < 0 (The Puzzle): If the line is below zero between two vertical lines, that period was dominated by the Carry Trade (high interest rates led to currency appreciation).
+
+Beta ≈ 1 (The Theory): If the line moves toward 1 after a vertical break, it suggests the market shifted toward "Fundamental" pricing, often seen during high-volatility regimes or major policy shifts.
+
+Narrow vs. Wide Ribbons: The shaded 95% confidence interval (CI) tells you how "meaningful" the data is. If the ribbon is very wide, the interest rate differential is a poor predictor of exchange rates for that period (high noise)
+
+pretty conclusively we did not find any evidence of UIP in our daily data.
+
+
+**Possible explanation for turnoil in 2012-2014**
+
+In 2012, US-Japan relations faced instability driven by Japan's domestic political turbulence, economic recession, and contentious base realignment issues in Okinawa. Japan’s rapid leadership turnover and high debt created uncertainty, while disputes over the Futenma air station relocation strained security cooperation amidst rising regional tensions with China. 
+
+In 2013, US-Japan relations faced instability largely driven by rising maritime tensions between Japan and China over the Senkaku Islands, causing concern that the US-Japan security alliance could be drawn into a conflict. Prime Minister Shinzo Abe sought stronger assurances of US defense, but tensions were exacerbated by regional disputes, economic concerns, and anxieties over the reliability of US protection. 
+
+In 2014, U.S.-Japan relations were marked by tension over trade negotiations, specifically the Trans-Pacific Partnership (TPP) and agricultural tariffs. Other factors included Japan's security challenges with China, disagreements over hosting U.S. troops, and Japan's push for a "Proactive Contribution to Peace"
+
+## Does UIP work better for daily data turned into monthly?
+
+```{python}
+#| label: monthly
+df_monthly = df.resample('ME', on='Date')[['Spot', 'IR_JP', 'IR_US']].last().reset_index()
+df_monthly["Diff"] = df_monthly["IR_JP"] - df_monthly["IR_US"]
+df_monthly["Diff_lag"] = df_monthly["Diff"].shift(1)
+df_monthly["dS"] = np.log(df_monthly["Spot"]).diff()                      # in log
+df_monthly["dSp"] = df_monthly["Spot"]/df_monthly["Spot"].shift(1)-1      # in %  
+reg = df_monthly[[main_y, "Diff_lag"]].dropna().copy()
+
+y = reg[main_y]
+X = sm.add_constant(reg["Diff_lag"])
+
+ols = sm.OLS(y, X).fit()
+
+ols.summary()
+```
+
+```{python}
+#| label: monthly tests
+NW_LAGS = 10   # Newey-West lags (rule of thumb: 4*(T/100)^(2/9) ≈ 10 for T~4000)
+nw  = ols.get_robustcov_results(cov_type="HAC", maxlags=NW_LAGS, use_correction=True)
+
+alpha_hat = ols.params["const"]
+beta_hat  = ols.params["Diff_lag"]
+T_reg     = int(ols.nobs)
+
+# Standard OLS s.e.
+ols_se_a = ols.bse[0]
+ols_se_b = ols.bse[1]
+
+# Newey-West s.e.
+nw_se_a  = nw.bse[0]
+nw_se_b  = nw.bse[1]
+
+tests_ols = [
+    t_test(alpha_hat, ols_se_a, 0, "H0: alpha = 0  (OLS SE)"),
+    t_test(beta_hat,  ols_se_b, 1, "H0: beta  = 1  (OLS SE)"),
+]
+tests_nw = [
+    t_test(alpha_hat, nw_se_a, 0, "H0: alpha = 0  (NW SE)"),
+    t_test(beta_hat,  nw_se_b, 1, "H0: beta  = 1  (NW SE)"),
+]
+
+# Joint Wald test: alpha=0 AND beta=1 simultaneously (Newey-West)
+R = np.array([[1, 0],
+              [0, 1]])
+r = np.array([0, 1])
+
+# wald_nw = nw.wald_test(sm.stats.contrast.ContrastResults, np.eye(2))
+# Manual Wald using NW covariance
+theta = np.array([alpha_hat, beta_hat])
+r_vec = np.array([0, 1])
+R_mat = np.eye(2)
+diff  = R_mat @ theta - r_vec
+V     = nw.cov_params()
+W     = diff @ np.linalg.inv(R_mat @ V @ R_mat.T) @ diff
+wald_p = 1 - stats.chi2.cdf(W, df=2)
+
+print(f"  T = {T_reg}  |  Newey-West lags = {NW_LAGS}")
+print(f"\n  alpha (intercept) = {alpha_hat:.6f}")
+print(f"  beta  (slope)     = {beta_hat:.6f}")
+print(f"  R-squared         = {ols.rsquared:.6f}")
+print(f"  Adj. R-squared    = {ols.rsquared_adj:.6f}")
+
+
+print("\n--- Individual t-tests ---")
+for t in tests_ols + tests_nw:
+    print(f"  {t['Hypothesis']:<38}  t={t['t-stat']:>8.4f}  p={t['p-value']:.4f}  "
+          f"Reject? {t['Reject H0 (5%)?']}")
+
+print(f"\n--- Joint Wald test: alpha=0 AND beta=1 (Newey-West) ---")
+print(f"  Chi2(2) = {W:.4f}   p-value = {wald_p:.4f}   "
+      f"Reject H0 (5%)? {'YES' if wald_p < 0.05 else 'NO'}")
+```
+
+```{python}
+#| layout-ncol: 1
+#| label: monthly rolling
+y = reg[main_y]
+X = sm.add_constant(reg['Diff_lag']*100)
+
+# Define the window size 
+window_size = 6  # 1/2 year 
+
+# Run the rolling regression
+model = RollingOLS(y, X, window=window_size)
+rolling_res = model.fit()
+rolling_r2 = rolling_res.rsquared
+
+# 4. Extract the coefficients (beta) and the 95% (1.96 is alpha/2) confidence intervals
+params = rolling_res.params['Diff_lag']
+std_err = rolling_res.bse['Diff_lag']
+upper_ci = np.minimum(params + (1.96 * std_err), 10)
+lower_ci =  np.maximum(params - (1.96 * std_err),-10)
+
+# 5. Plotting
+plt.figure(figsize=(12, 6))
+plt.plot(df_monthly["Date"].drop(1), params, label='Rolling Beta (UIP Coefficient)', color='blue')
+# plt.plot(rolling_r2, label='Rolling R^2', color='black')
+plt.fill_between(df_monthly["Date"].drop(1), lower_ci, upper_ci, color='blue', alpha=0.1, label='95% CI')
+plt.axhline(y=1, color='red', linestyle='--', label='Theoretical UIP (Beta=1)')
+plt.axhline(y=0, color='black', linewidth=0.8)
+plt.title(f'Rolling UIP Regression ({window_size}-Period Window)')
+plt.legend()
+
+points = params.dropna().values
+df_monthly["rollBETA"] = np.concat([[np.nan] *(window_size), points])
+# 2. Use the "Pelt" algorithm to find breaks in the mean of the Beta
+# 'model="l2"' looks for shifts in the average value of the beta
+algo = rpt.Pelt(model="l2").fit(points)
+result = algo.predict(pen=10) # 'pen' controls how 'strict' it is about finding a break
+
+# You can then map these indices back to your dataframe dates.
+break_dates = params.dropna().index[result[:-1]]
+
+for i, b_date in enumerate(break_dates):
+    plt.axvline(x=df_monthly[df_monthly.index == b_date]["Date"], color='darkorange', linestyle=':', lw=2, label='Structural Break' if i == 0 else "")
+plt.show()
+
+df_monthly[df_monthly.index.isin(break_dates)]
+```
+
+We see that using monthly data it holds better but never consistently at the $\beta = 1$ levels needed to confirm the existance of UIP in the dataset
+
+# Trading strategy?
+If your rolling regression shows a **Beta ($\beta$) of 0**, it means there is **zero correlation** between the interest rate differential and the change in the exchange rate.
+
+In the world of UIP, $\beta = 1$ is the theory, and $\beta < 0$ is the "Carry Trade" (where high-rate currencies appreciate). If **$\beta = 0$**, the interest differential is "noise" and provides no information about where the spot price is going.
+
+Here are three strategies to exploit a $\beta = 0$ environment:
+
+**1. The "Pure" Carry Trade (Income Focus)**
+
+When $\beta = 0$, the exchange rate change ($dS$) is essentially a random walk that doesn't "fight" the interest rate.
+
+* **The Logic:** If the exchange rate doesn't depreciate to offset the interest gain (as UIP predicts), you can simply harvest the interest.
+* **The Play:** 1.  Borrow in the low-rate currency (e.g., JPY at 1%).
+2.  Lend in the high-rate currency (e.g., USD at 5%).
+3.  **The Result:** Since $\beta = 0$, the spot rate is just as likely to go up as down. On average, the spot change is neutral, and you pocket the **4% spread** as pure profit.
+* **Risk:** You are exposed to "Black Swan" events (sudden spikes in volatility) that could wipe out your 4% gain in a single day.
+
+**2. Delta-Neutral Volatility Trading (Options)**
+
+If the interest differential has no predictive power over the spot price, the market might be mispricing **Options**.
+
+* **The Logic:** If $\beta = 0$, interest rate news doesn't move the spot trend, but it likely increases **uncertainty**.
+* **The Play:** A **Long Straddle** or **Strangle**.
+* Buy both a Call and a Put option on the USD/JPY.
+* You don't care *which* way the currency moves; you are betting that the "noise" (volatility) will be higher than what the option premiums suggest.
+
+
+* **Why it works here:** In a $\beta=0$ regime, the currency is often "directionless" but jittery. You profit from the swings rather than the trend.
+
+**3. Mean Reversion (Grid Trading)**
+
+A $\beta = 0$ environment often indicates a "range-bound" market where the exchange rate is stuck in a horizontal channel because neither country's interest rates are driving a clear trend.
+
+* **The Logic:** If $dS$ isn't responding to interest differentials, it's likely bouncing between support and resistance levels.
+* **The Play:** **Grid Trading**.
+1. Set "Buy" orders at intervals below the current price.
+2. Set "Sell" orders at intervals above.
+3. As the price oscillates (without trending), you "buy low/sell high" repeatedly.
+
+
+* **The "Kicker":** Because you are holding the high-interest currency (USD) in your "Buy" slots, you collect **Positive Swap** (interest) while waiting for the price to bounce back up to your sell target.
+
+**Which one should you pick?**
+
+Look at your **$R^2$ (Coefficient of Determination)** from your Python regression:
+
+| If $R^2$ is...    | The Environment is...    | Best Strategy                                     |
+| ----------------- | ------------------------ | ------------------------------------------------- |
+| **Low (~0.01)**   | Pure Noise / Random Walk | **Pure Carry Trade** (Collect the spread).        |
+| **High (>0.10)**  | Volatile but non-UIP     | **Options Straddle** (Trade the volatility).      |
+| **Low + Low Vol** | Range-bound              | **Grid Trading** (Collect spread + small swings). |
+
+**A Note of Caution**
+
+A $\beta = 0$ is the "calm before the storm." Historically, when the relationship between interest rates and exchange rates breaks down completely, it often ends with a **Structural Break** where the currency moves violently to "catch up" to the fundamentals.
+
+To code a Pure Carry Trade strategy, we assume that since $\beta = 0$, the interest differential is "free money"—the exchange rate is not expected to move in a way that offsets your interest gains.In this strategy, we will:Calculate the Daily Excess Return: This is the interest earned minus (or plus) the loss/gain from the exchange rate shift.Cumulative Returns: See how much a $1 investment would have grown.Risk Metrics: Calculate the Sharpe Ratio and Maximum Drawdown (crucial for JPY carry trades).
+
+We assume we are borrowing JPY (low rate) to buy USD (high rate), Japan represents the 'funding' rate, the US is the 'investing' rate
+
+We did this strategy with daily data with the Interest Differential (Annual rate converted to daily)
+
+```{python}
+#| label: strat
+#| layout-ncol: 1
+# Most carry trades use (Target_Rate - Funding_Rate)
+df['Daily_Carry'] = (df['IR_US'] - df['IR_JP']) *12/252
+
+# Total Daily Return = Interest Income + Spot Capital Gain
+# Note: If USD/JPY (Spot) goes UP, the USD has appreciated = Profit
+df['Strategy_Return'] = df['Daily_Carry'] + df[main_y]
+
+# --- 2. Calculate Performance ---
+# Calculate cumulative growth of $1
+df['Cumulative_Carry_Return'] = (1 + df['Strategy_Return']).cumprod()
+df['Cumulative_Spot_Only'] = (1 + df[main_y]).cumprod() # For comparison
+
+# --- 3. Risk Metrics ---
+ann_return = df['Strategy_Return'].mean() * 252
+ann_vol = df['Strategy_Return'].std() * np.sqrt(252)
+sharpe = ann_return / ann_vol
+
+# Maximum Drawdown
+rolling_max = df['Cumulative_Carry_Return'].cummax()
+drawdown = (df['Cumulative_Carry_Return'] - rolling_max) / rolling_max
+max_dd = drawdown.min()
+
+# --- 4. Plotting ---
+plt.figure(figsize=(12, 6))
+plt.plot(df['Date'], df['Cumulative_Carry_Return'], label='Carry Trade (Interest + Spot)', color='green', lw=2)
+plt.plot(df['Date'], df['Cumulative_Spot_Only'], label='Spot Only (No Interest)', color='gray', alpha=0.5, linestyle='--')
+
+plt.title(f'JPY/USD Carry Trade Performance ($\\beta=0$ Assumption)', fontsize=14)
+plt.ylabel('Value of $1 Investment')
+plt.legend()
+plt.grid(alpha=0.3)
+plt.show()
+
+GTTTstrat1 = (
+  GT(pd.DataFrame({"STATS" : ["Annualized Return", "Annualized Vol", "Sharpe Ratio", "Max Drawdown"], 
+                    "VALS" : [ann_return, ann_vol, sharpe, max_dd]}))
+  .fmt_percent(columns="VALS")
+  .opt_stylize(5,"blue")
+  .tab_header("Normal Carry Trade Strategy")
+)
+
+GTTTstrat1
+```
+
+its pretty clear to see that there is a big negative gap from theory to practice this is due to many factors 
+
+A "Pure Carry Trade" traditionally involves borrowing JPY to buy USD. However, in your dataset, Japan now has a significantly higher interest rate than the US. * The Math: Every day you hold USD, you are paying out 3.595% and receiving only 1.018%.
+
+The Result: You are losing roughly 2.57% per year just to hold the position. This is called "Negative Carry." Your strategy return is Spot Change - 2.57%. Naturally, this will always be lower than the Spot Change alone.
+
+**The "Double Whammy" (Spot + Interest)**
+
+If your strategy is performing significantly worse than spot, it’s because you are likely facing two headwinds simultaneously:
+
+Interest Cost: You are paying the high Japanese interest rate.
+
+Spot Depreciation: If the USD is also weakening against the JPY (meaning the Spot number in your df is going down), you are losing money on the exchange rate on top of the interest you are paying.
+
+**Why did this happen?**
+
+Historically (2010–2022), Japan had near-zero rates and the US had higher rates. The "Carry Trade" worked because you got paid to wait.
+
+Your data shows a massive regime shift where:
+
+The US lowered rates (perhaps due to a recession or policy shift).
+
+Japan raised rates aggressively (perhaps to combat the inflation that was building up in 2024-2025).
+
+```{python}
+#| label: dum strat
+#| layout-ncol: 1
+# Set Position: 1 if US rates are higher, -1 if JP rates are higher
+df['Position'] = np.where(df['Daily_Carry'] > 0, 1, -1)
+
+# 3. Calculate Strategy Return
+# Note: np.abs(df['Daily_Carry']) ensures we always COLLECT the higher interest
+df['Dynamic_Return'] = (df['Position'] * df[main_y]) + np.abs(df['Daily_Carry'])
+
+# 4. Cumulative Performance
+df['Cum_Dynamic'] = (1 + df['Dynamic_Return']).cumprod()
+df['Cum_Spot_Only'] = (1 + df[main_y]).cumprod()
+
+# 5. Calculate Risk Metrics
+ann_return = df['Dynamic_Return'].mean() * 252
+ann_vol = df['Dynamic_Return'].std() * np.sqrt(252)
+sharpe = ann_return / ann_vol
+
+# Max Drawdown
+rolling_max = df['Cum_Dynamic'].cummax()
+drawdown = (df['Cum_Dynamic'] - rolling_max) / rolling_max
+max_dd = drawdown.min()
+
+# 6. Plotting
+plt.figure(figsize=(12, 5))
+
+# Plot the Growth
+plt.plot(df['Date'], df['Cum_Dynamic'], label='Dynamic Carry (High-Yield Focus)', color='forestgreen', lw=2.5)
+plt.plot(df['Date'], df['Cum_Spot_Only'], label='Spot Only (USD/JPY Buy & Hold)', color='gray', alpha=0.5, ls='--')
+
+# Add a background color to show where you switched from Long USD to Long JPY
+# Red area = Long USD, Blue area = Long JPY
+plt.fill_between(df['Date'], df['Cum_Dynamic'].min(), df['Cum_Dynamic'].max(), 
+                 where=(df['Position'] == 1), color='red', alpha=0.05, label='Long USD Regime')
+plt.fill_between(df['Date'], df['Cum_Dynamic'].min(), df['Cum_Dynamic'].max(), 
+                 where=(df['Position'] == -1), color='blue', alpha=0.05, label='Long JPY Regime')
+
+plt.title('Dynamic Carry Trade Strategy: JPY/USD (2010 - 2026)', fontsize=16)
+plt.ylabel('Value of $1 Investment', fontsize=12)
+plt.legend(loc='upper left', frameon=True)
+plt.grid(alpha=0.3, ls=':')
+plt.tight_layout()
+plt.show()
+
+GTTTstrat2 = (
+  GT(pd.DataFrame({"STATS" : ["Annualized Return", "Annualized Vol", "Sharpe Ratio", "Max Drawdown"], 
+                    "VALS" : [ann_return, ann_vol, sharpe, max_dd]}))
+  .fmt_percent(columns="VALS")
+  .opt_stylize(5,"blue")
+  .tab_header("Dynamic Carry Trade Strategy")
+)
+GTTTstrat2
+```
+
+```{python}
+#| include: false
+#| label: final_beep
+#| error: false
+try:
+    from beepy.beep import beep
+    beep(15, volume=0.2)
+    print("Beep played successfully!")
+except Exception as e:
+    print(f"Beep failed: {e}")
+```
+
+
