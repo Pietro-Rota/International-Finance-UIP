@@ -27,7 +27,8 @@ This repository contains a full end-to-end analysis, from raw data to trading si
 ---
 
 ### How to use
-* Download the html file with all our analysis
+* Open the github pages link to see our analysis without downloading anything
+* Download the html file for offline viewing
 * Read the PDF assignment
 * Lastly, clone the repo and run the Quarto notebook 
 ---
