@@ -128,6 +128,8 @@ print(f"Sample: {df.iloc[0]["Date"].strftime("%Y-%m-%d")} -> {df.iloc[len(df)-1]
 
 ```{python}
 #| label: destable
+#| html-table-processing: none
+
 desc_vars = {
     "Spot Rate (JPY/USD)"         : df_plot["Spot"],
     "Log ΔSpot"                   : df_plot["dS"],
@@ -173,6 +175,7 @@ GTTTdes
 ```
 
 ```{python}
+#| html-table-processing: none
 # 1. Update labels to be explicit about units and frequency
 desc_vars = {
     "Spot Rate (JPY/USD)"         : df_plot["Spot"],
@@ -880,6 +883,8 @@ We did this strategy with daily data with the Interest Differential (Annual rate
 ```{python}
 #| label: strat
 #| layout-ncol: 1
+#| html-table-processing: none
+
 # Most carry trades use (Target_Rate - Funding_Rate)
 df['Daily_Carry'] = (df['IR_US'] - df['IR_JP']) *12/252
 
@@ -951,6 +956,8 @@ Japan raised rates aggressively (perhaps to combat the inflation that was buildi
 ```{python}
 #| label: dum strat
 #| layout-ncol: 1
+#| html-table-processing: none
+
 # Set Position: 1 if US rates are higher, -1 if JP rates are higher
 df['Position'] = np.where(df['Daily_Carry'] > 0, 1, -1)
 
