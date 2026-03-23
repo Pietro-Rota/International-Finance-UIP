@@ -27,8 +27,7 @@ This repository contains a full end-to-end analysis, from raw data to trading si
 ---
 
 ### How to use
-Download the html file with all our analysis
-Read the PDF assignment
-Simply clone the repo and run the notebook to see the results of the regression and whether the trading strategy survived the 2024-2025 regime shift.
-
+* Download the html file with all our analysis
+* Read the PDF assignment
+* Lastly, clone the repo and run the Quarto notebook 
 ---
